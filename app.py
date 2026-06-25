@@ -18,15 +18,126 @@ from src.school_meta import save_school_meta, school_meta_template
 from src.volunteer_plan import generate_volunteer_draft
 
 
+PROCESSED_DATA_FILES: list[tuple[str, str, bool]] = [
+    ("catalog_2026.csv", "2026 招生专业目录", True),
+    ("admission_2025_regular.csv", "2025 普通本科批投档", True),
+    ("admission_2024_regular.csv", "2024 普通本科批投档", True),
+    ("early_admission_2025.csv", "2025 提前批 A/B/C", False),
+    ("early_admission_2024.csv", "2024 提前批 A/B/C", False),
+    ("score_rank_2024.csv", "2024 一分一段/分数段", False),
+    ("school_meta.csv", "学校属性库", False),
+]
+
+
 st.set_page_config(page_title="贵州高考本科志愿筛选工具", layout="wide")
 ensure_dirs()
 ensure_school_meta_template()
 
 
 def status_label(status: str) -> str:
-    return {"available": "已导入", "missing": "缺失", "optional": "可选缺失"}.get(status, status)
+    return {"available": "已找到", "missing": "缺失", "optional": "可选缺失"}.get(status, status)
 
 
+def table_name_for_data_type(data_type: str) -> str:
+    if data_type == "catalog":
+        return "catalog_2026"
+    if data_type == "early_admission":
+        return "admission_early"
+    if data_type == "score_rank":
+        return "score_rank"
+    if data_type == "regular_admission":
+        return "admission_regular"
+    raise ValueError(f"未知数据类型：{data_type}")
+
+
+def read_ready_file(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path, dtype=str).fillna("")
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return pd.read_excel(path, dtype=str).fillna("")
+    raise ValueError(f"直接使用模式只支持 CSV/Excel：{path.suffix}")
+
+
+def fill_default(df: pd.DataFrame, column: str, value: object) -> None:
+    if column not in df.columns:
+        df[column] = value
+        return
+    blank_mask = df[column].isna() | (df[column].astype(str).str.strip() == "")
+    df.loc[blank_mask, column] = value
+
+
+def prepare_ready_dataframe(
+    df: pd.DataFrame,
+    data_type: str,
+    year: int,
+    subject_group: str,
+    batch_group: str,
+) -> pd.DataFrame:
+    out = df.copy().fillna("")
+    if out.empty:
+        return out
+
+    fill_default(out, "year", year)
+    fill_default(out, "subject_group", subject_group)
+
+    if data_type in {"catalog", "regular_admission"}:
+        fill_default(out, "batch_group", batch_group)
+    if data_type == "catalog":
+        fill_default(out, "batch", "本科批" if batch_group == "regular_undergraduate" else "本科提前批")
+        fill_default(out, "early_batch_stage", batch_group.split("_", 1)[1] if batch_group.startswith("early_") else "")
+        fill_default(out, "is_undergraduate", True)
+        fill_default(out, "is_regular_undergraduate", batch_group == "regular_undergraduate")
+        fill_default(out, "is_early_batch", batch_group.startswith("early_"))
+    if data_type == "early_admission":
+        fill_default(out, "early_batch_stage", batch_group.split("_", 1)[1] if batch_group.startswith("early_") else "")
+
+    return out
+
+
+def load_ready_dataframe(
+    file_path: str | Path,
+    data_type: str,
+    year: int,
+    subject_group: str,
+    batch_group: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    path = Path(file_path)
+    if data_type not in {"catalog", "regular_admission", "early_admission", "score_rank"}:
+        return pd.DataFrame(), [f"未知数据类型：{data_type}"]
+    try:
+        raw_df = read_ready_file(path)
+        return prepare_ready_dataframe(raw_df, data_type, year, subject_group, batch_group), [
+            "已跳过 PDF/表格解析，按标准数据直接保存。"
+        ]
+    except Exception as exc:
+        return pd.DataFrame(), [f"直接读取失败：{exc}"]
+
+
+def _file_size_label(path: Path) -> str:
+    if not path.exists():
+        return ""
+    size_mb = path.stat().st_size / 1024 / 1024
+    return f"{size_mb:.2f} MB" if size_mb >= 0.01 else f"{path.stat().st_size} B"
+
+
+def build_processed_status() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for file_name, usage, required in PROCESSED_DATA_FILES:
+        path = PROCESSED_DIR / file_name
+        rows.append(
+            {
+                "file_name": file_name,
+                "usage": usage,
+                "required": required,
+                "status": "可直接使用" if path.exists() else ("缺失" if required else "可选缺失"),
+                "size": _file_size_label(path),
+                "path": str(path),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
 def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     catalog = load_processed_csv("catalog_2026.csv")
     admission_2025 = load_processed_csv("admission_2025_regular.csv")
@@ -50,22 +161,18 @@ def parse_available_files(registry: pd.DataFrame) -> list[str]:
             item["batch_group"],
         )
         message = "；".join(result.messages)
-        logs.append(f"{Path(item['source_path']).name}: 成功 {result.success_rows} 行，失败 {result.failed_rows} 行，可疑 {result.suspicious_rows} 行。{message}")
+        logs.append(
+            f"{Path(item['source_path']).name}: 成功 {result.success_rows} 行，失败 {result.failed_rows} 行，"
+            f"可疑 {result.suspicious_rows} 行。{message}"
+        )
         if result.dataframe.empty:
             continue
         key = (item["data_type"], int(item["year"]) if pd.notna(item["year"]) else 0)
         grouped.setdefault(key, []).append(result.dataframe)
 
-    for (data_type, year), frames in grouped.items():
+    for (data_type, _year), frames in grouped.items():
         frame = pd.concat(frames, ignore_index=True)
-        if data_type == "catalog":
-            save_dataframe(frame, "catalog_2026")
-        elif data_type == "regular_admission":
-            save_dataframe(frame, "admission_regular")
-        elif data_type == "early_admission":
-            save_dataframe(frame, "admission_early")
-        elif data_type == "score_rank":
-            save_dataframe(frame, "score_rank")
+        save_dataframe(frame, table_name_for_data_type(data_type))
     return logs
 
 
@@ -76,37 +183,91 @@ if "basket" not in st.session_state:
 st.title("贵州高考本科志愿筛选工具")
 registry = build_data_registry(RAW_DIR)
 summary = registry_summary(registry)
+processed_status = build_processed_status()
+processed_available = int((processed_status["status"] == "可直接使用").sum()) if not processed_status.empty else 0
+processed_missing_required = int(
+    ((processed_status["status"] == "缺失") & processed_status["required"]).sum()
+) if not processed_status.empty else 0
+processed_optional_missing = int((processed_status["status"] == "可选缺失").sum()) if not processed_status.empty else 0
 
-st.subheader("数据完整度")
+st.subheader("可直接使用的数据")
 metric_cols = st.columns(3)
-metric_cols[0].metric("已找到文件", summary["available"])
-metric_cols[1].metric("MVP 必需缺失", summary["missing_required"])
-metric_cols[2].metric("可选缺失", summary["optional_missing"])
+metric_cols[0].metric("标准数据文件", processed_available)
+metric_cols[1].metric("必需缺失", processed_missing_required)
+metric_cols[2].metric("可选缺失", processed_optional_missing)
 
-display_registry = registry.copy()
-display_registry["状态"] = display_registry["status"].map(status_label)
+display_processed = processed_status.copy()
+display_processed["必需"] = display_processed["required"].map({True: "是", False: "否"})
 st.dataframe(
-    display_registry[["file_id", "year", "subject_group", "data_type", "batch_group", "状态", "source_path", "notes"]],
+    display_processed[["file_name", "usage", "必需", "status", "size", "path"]],
     use_container_width=True,
     hide_index=True,
 )
-missing_required = registry[(registry["status"] == "missing") & registry["is_required_for_mvp"]]
-if not missing_required.empty:
-    st.warning("部分 MVP 必需文件缺失，应用仍可运行，但推荐结果会受影响。")
+if processed_missing_required:
+    st.warning("缺少可直接使用的标准数据。可把标准 CSV 放入 data/processed，或在下方上传已整理 CSV/Excel 后直接保存。")
+else:
+    st.success("已找到普通本科批推荐所需的标准数据，生成推荐时无需再解析 PDF。")
+
+with st.expander("原始文件解析状态（可选）", expanded=False):
+    st.caption("这里只用于从 data/raw 生成标准 CSV。已有 data/processed 标准数据时，可以忽略这里的缺失提示。")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("已找到原始文件", summary["available"])
+    metric_cols[1].metric("MVP 原始文件缺失", summary["missing_required"])
+    metric_cols[2].metric("可选原始文件缺失", summary["optional_missing"])
+
+    display_registry = registry.copy()
+    display_registry["状态"] = display_registry["status"].map(status_label)
+    st.dataframe(
+        display_registry[["file_id", "year", "subject_group", "data_type", "batch_group", "状态", "source_path", "notes"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    missing_required = registry[(registry["status"] == "missing") & registry["is_required_for_mvp"]]
+    if not missing_required.empty:
+        st.info("原始文件缺失不会阻止已处理数据直接使用，只会影响重新解析生成标准 CSV。")
 
 with st.expander("数据导入与保存", expanded=False):
-    st.caption("自动读取 data/raw，也可以上传 CSV/Excel/PDF 替代。PDF 为尽力解析，复杂版式建议导出为人工修正 CSV。")
-    if st.button("一键解析 data/raw 并保存到 SQLite/CSV", type="primary"):
+    st.caption("推荐优先使用 data/processed 中的标准 CSV。直接导入不会调用 PDF 解析；只有需要从原始 PDF/非标准表格生成标准数据时，再使用慢速解析。")
+
+    st.markdown("#### 直接使用已整理数据（推荐）")
+    st.caption("上传已经整理好的标准 CSV/Excel，会直接保存到 data/processed，不走 PDF 表格提取和解析器。")
+    ready_uploaded = st.file_uploader("上传已整理标准 CSV/Excel", type=["csv", "xlsx", "xls"], key="ready_upload")
+    r1, r2, r3, r4 = st.columns(4)
+    ready_type = r1.selectbox("数据类型", ["catalog", "regular_admission", "early_admission", "score_rank"], key="ready_type")
+    ready_year = r2.selectbox("年份", [2026, 2025, 2024], key="ready_year")
+    ready_subject = r3.selectbox("科类", ["物理类", "历史类"], key="ready_subject")
+    ready_batch = r4.selectbox("批次组", ["regular_undergraduate", "early_A", "early_B", "early_C"], key="ready_batch")
+    ready_replace = st.checkbox("覆盖同类型同年份旧数据", value=True, key="ready_replace")
+    if ready_uploaded and st.button("直接保存并使用", type="primary"):
+        ready_dir = RAW_DIR / "ready"
+        ready_dir.mkdir(exist_ok=True)
+        target = ready_dir / ready_uploaded.name
+        target.write_bytes(ready_uploaded.getvalue())
+        ready_df, ready_messages = load_ready_dataframe(target, ready_type, ready_year, ready_subject, ready_batch)
+        if ready_df.empty:
+            st.warning("没有读取到可保存的数据。" + ("；".join(ready_messages) if ready_messages else ""))
+        else:
+            table = table_name_for_data_type(ready_type)
+            save_dataframe(ready_df, table, replace=ready_replace)
+            load_processed_data.clear()
+            st.success(f"已跳过解析，保存 {len(ready_df)} 行到标准数据：{table}")
+            for message in ready_messages:
+                st.caption(message)
+
+    st.markdown("#### 慢速解析原始 PDF/表格（可选）")
+    st.caption("仅当没有标准 CSV/Excel，需要从 data/raw 或上传的 PDF/非标准表格生成标准数据时使用。")
+    if st.button("一键解析 data/raw 并保存到 SQLite/CSV"):
         with st.spinner("正在解析数据文件..."):
             logs = parse_available_files(registry)
         st.session_state["parse_logs"] = logs
+        load_processed_data.clear()
         st.success("解析流程完成")
-    uploaded = st.file_uploader("手动上传数据文件", type=["pdf", "csv", "xlsx", "xls"])
+    uploaded = st.file_uploader("手动上传并解析数据文件", type=["pdf", "csv", "xlsx", "xls"], key="parse_upload")
     c1, c2, c3, c4 = st.columns(4)
-    manual_type = c1.selectbox("数据类型", ["catalog", "regular_admission", "early_admission", "score_rank"], key="manual_type")
-    manual_year = c2.selectbox("年份", [2026, 2025, 2024], key="manual_year")
-    manual_subject = c3.selectbox("科类", ["物理类", "历史类"], key="manual_subject")
-    manual_batch = c4.selectbox("批次组", ["regular_undergraduate", "early_A", "early_B", "early_C"], key="manual_batch")
+    manual_type = c1.selectbox("解析数据类型", ["catalog", "regular_admission", "early_admission", "score_rank"], key="manual_type")
+    manual_year = c2.selectbox("解析年份", [2026, 2025, 2024], key="manual_year")
+    manual_subject = c3.selectbox("解析科类", ["物理类", "历史类"], key="manual_subject")
+    manual_batch = c4.selectbox("解析批次组", ["regular_undergraduate", "early_A", "early_B", "early_C"], key="manual_batch")
     if uploaded and st.button("解析上传文件"):
         upload_dir = RAW_DIR / "uploads"
         upload_dir.mkdir(exist_ok=True)
@@ -115,8 +276,8 @@ with st.expander("数据导入与保存", expanded=False):
         result = load_data_file(target, manual_type, manual_year, manual_subject, manual_batch)
         st.write(f"成功 {result.success_rows} 行，失败 {result.failed_rows} 行，可疑 {result.suspicious_rows} 行")
         if not result.dataframe.empty:
-            table = "catalog_2026" if manual_type == "catalog" else ("admission_early" if manual_type == "early_admission" else ("score_rank" if manual_type == "score_rank" else "admission_regular"))
-            save_dataframe(result.dataframe, table)
+            save_dataframe(result.dataframe, table_name_for_data_type(manual_type))
+            load_processed_data.clear()
             st.success("已保存")
     for log in st.session_state.get("parse_logs", []):
         st.text(log)
@@ -152,8 +313,8 @@ with st.expander("数据导入与保存", expanded=False):
         target.write_bytes(corrected.getvalue())
         result = load_data_file(target, template_type, corrected_year, corrected_subject, corrected_batch)
         if not result.dataframe.empty:
-            table = "catalog_2026" if template_type == "catalog" else ("admission_early" if template_type == "early_admission" else ("score_rank" if template_type == "score_rank" else "admission_regular"))
-            save_dataframe(result.dataframe, table, replace=False)
+            save_dataframe(result.dataframe, table_name_for_data_type(template_type), replace=False)
+            load_processed_data.clear()
             st.success(f"已追加修正数据 {len(result.dataframe)} 行")
         else:
             st.warning("修正文件未解析出有效行，请检查列名。")
@@ -175,6 +336,7 @@ with st.expander("数据导入与保存", expanded=False):
         else:
             meta_df = pd.read_excel(meta_path, dtype=str).fillna("")
         save_school_meta(meta_df)
+        load_processed_data.clear()
         st.success("学校属性库已保存。")
 
 catalog_df, admission_2025_df, admission_2024_df, early_2025_df, early_2024_df, school_meta_df, score_rank_df = load_processed_data()
@@ -264,7 +426,7 @@ if st.button("生成普通本科批推荐", type="primary"):
 results = st.session_state.get("regular_results", pd.DataFrame())
 st.subheader("普通本科批结果")
 if results.empty:
-    st.info("暂无推荐结果。请先解析数据，或上传 CSV/Excel 替代 PDF 后再生成。")
+    st.info("暂无推荐结果。请先放入或上传 data/processed 标准 CSV，或使用慢速解析生成标准数据后再生成。")
 else:
     tabs = st.tabs(["冲", "稳", "保", "垫", "缺少历史数据"])
     results_by_level = {}
