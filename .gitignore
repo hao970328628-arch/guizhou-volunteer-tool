@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime outputs
+streamlit.*.log
+*.sqlite3
+upload_payload.json
+data/processed/*.csv
+!data/processed/school_meta.csv
+!data/processed/major_category_rules.json
+
+# Raw admission/catalog files are local data assets.
+# Some PDFs exceed GitHub's 100 MB normal file limit; keep them local or use Git LFS.
+data/raw/**/*.pdf
+data/raw/uploads/
+data/raw/corrections/
+
+# Office temp files
+~$*.xlsx
+~$*.xls
