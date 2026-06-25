@@ -11,6 +11,7 @@ from .catalog_parser import parse_catalog_dataframe
 from .config import PROCESSED_DIR, ensure_dirs
 from .early_batch_parser import parse_early_admission_dataframe
 from .pdf_parser import extract_pdf_tables
+from .score_rank import parse_score_rank_dataframe
 from .utils import to_int
 
 
@@ -38,6 +39,8 @@ def _parse_by_type(df: pd.DataFrame, data_type: str, year: int, subject_group: s
         return parse_regular_admission_dataframe(df, year, subject_group, batch_group)
     if data_type == "early_admission":
         return parse_early_admission_dataframe(df, year, subject_group, batch_group)
+    if data_type == "score_rank":
+        return parse_score_rank_dataframe(df, year, subject_group)
     return df
 
 
@@ -183,6 +186,8 @@ def correction_template(data_type: str) -> pd.DataFrame:
             "school_code", "school_name", "major_code", "major_name", "enroll_type", "plan_count", "min_score",
             "min_rank", "source_file", "source_page", "raw_text",
         ]
+    elif data_type == "score_rank":
+        columns = ["score", "same_score_count", "cumulative_count", "rank_low", "source_file", "source_page", "raw_text"]
     else:
         columns = [
             "school_code", "school_name", "major_code", "major_name", "enroll_type", "plan_count", "投档人数",

@@ -4,6 +4,7 @@ from typing import Any
 
 import pandas as pd
 
+from .charter_risk import collect_charter_risks
 from .early_batch_parser import infer_special_type
 from .risk_model import classify_risk
 
@@ -34,6 +35,12 @@ def _special_enabled(special_type: str, profile: dict[str, Any]) -> bool:
     }
     key = mapping.get(special_type)
     return True if key is None else bool(profile.get(key))
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "是", "需要", "有"}
+    return bool(value)
 
 
 def _attention_level(risk_level: str, has_restrictions: bool) -> str:
@@ -72,20 +79,28 @@ def recommend_early(
         if not _special_enabled(special_type, user_profile):
             continue
 
-        risk = classify_risk(user_profile.get("student_rank"), row.get("min_rank"))
+        match_2024 = _match_early_2024(row, early_2024_df)
+        risk = classify_risk(
+            user_profile.get("student_rank"),
+            row.get("min_rank"),
+            rank_2024=match_2024.get("min_rank") if match_2024 else None,
+        )
         restrictions = {
-            "是否需要体检": bool(row.get("requires_physical_exam")),
-            "是否需要政审": bool(row.get("requires_political_review")),
-            "是否需要面试": bool(row.get("requires_interview")),
-            "是否需要体能测试": bool(row.get("requires_fitness_test")),
-            "是否有身高要求": bool(row.get("height_requirement")),
-            "是否有视力要求": bool(row.get("vision_requirement")),
-            "是否有性别限制": bool(row.get("gender_requirement")),
-            "是否有单科成绩要求": bool(row.get("single_subject_requirement")),
-            "是否要求特殊类型控制线": bool(row.get("requires_special_control_line")),
+            "是否需要体检": _truthy(row.get("requires_physical_exam")),
+            "是否需要政审": _truthy(row.get("requires_political_review")),
+            "是否需要面试": _truthy(row.get("requires_interview")),
+            "是否需要体能测试": _truthy(row.get("requires_fitness_test")),
+            "是否有身高要求": _truthy(row.get("height_requirement")),
+            "是否有视力要求": _truthy(row.get("vision_requirement")),
+            "是否有性别限制": _truthy(row.get("gender_requirement")),
+            "是否有单科成绩要求": _truthy(row.get("single_subject_requirement")),
+            "是否要求特殊类型控制线": _truthy(row.get("requires_special_control_line")),
         }
         has_restrictions = any(restrictions.values())
+        charter_warnings = collect_charter_risks(row.get("raw_text", ""), row.get("major_name", ""), row.get("warnings", ""))
         attention = _attention_level(risk.risk_level, has_restrictions)
+        if user_profile.get("requires_early_checks") is False and has_restrictions:
+            attention = "资格限制较多"
         rows.append(
             {
                 "批次段 A/B/C": stage,
@@ -95,10 +110,10 @@ def recommend_early(
                 "2026 计划数": row.get("plan_count", ""),
                 "2025 最低分": row.get("min_score", ""),
                 "2025 最低位次": row.get("min_rank", ""),
-                "2024 最低分": "",
-                "2024 最低位次": "",
+                "2024 最低分": match_2024.get("min_score", "") if match_2024 else "",
+                "2024 最低位次": match_2024.get("min_rank", "") if match_2024 else "",
                 **restrictions,
-                "风险提示": "；".join(risk.warnings) or attention,
+                "风险提示": "；".join(risk.warnings + charter_warnings) or attention,
                 "推荐说明": risk.risk_reason,
             }
         )
@@ -106,3 +121,23 @@ def recommend_early(
     if result.empty:
         return pd.DataFrame(columns=EARLY_OUTPUT_COLUMNS)
     return result[EARLY_OUTPUT_COLUMNS]
+
+
+def _match_early_2024(row: pd.Series, early_2024_df: pd.DataFrame) -> dict[str, Any] | None:
+    if early_2024_df.empty:
+        return None
+    school_code = str(row.get("school_code", ""))
+    major_code = str(row.get("major_code", ""))
+    major_name = str(row.get("major_name_clean") or row.get("major_name", ""))
+    stage = str(row.get("early_batch_stage", ""))
+    for _, candidate in early_2024_df.iterrows():
+        if (
+            str(candidate.get("school_code", "")) == school_code
+            and str(candidate.get("major_code", "")) == major_code
+            and (not stage or str(candidate.get("early_batch_stage", "")) == stage)
+        ):
+            return candidate.to_dict()
+    for _, candidate in early_2024_df.iterrows():
+        if str(candidate.get("school_code", "")) == school_code and str(candidate.get("major_name_clean") or candidate.get("major_name", "")) == major_name:
+            return candidate.to_dict()
+    return None

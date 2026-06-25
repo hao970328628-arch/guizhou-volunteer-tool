@@ -13,7 +13,9 @@ from src.early_recommender import recommend_early
 from src.export_excel import export_results_to_excel
 from src.major_classifier import load_rules
 from src.recommender import recommend_regular
+from src.score_rank import estimate_rank
 from src.school_meta import save_school_meta, school_meta_template
+from src.volunteer_plan import generate_volunteer_draft
 
 
 st.set_page_config(page_title="贵州高考本科志愿筛选工具", layout="wide")
@@ -25,14 +27,15 @@ def status_label(status: str) -> str:
     return {"available": "已导入", "missing": "缺失", "optional": "可选缺失"}.get(status, status)
 
 
-def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     catalog = load_processed_csv("catalog_2026.csv")
     admission_2025 = load_processed_csv("admission_2025_regular.csv")
     admission_2024 = load_processed_csv("admission_2024_regular.csv")
     early_2025 = load_processed_csv("early_admission_2025.csv")
     early_2024 = load_processed_csv("early_admission_2024.csv")
     school_meta = load_processed_csv("school_meta.csv")
-    return catalog, admission_2025, admission_2024, early_2025, early_2024, school_meta
+    score_rank = load_processed_csv("score_rank_2024.csv")
+    return catalog, admission_2025, admission_2024, early_2025, early_2024, school_meta, score_rank
 
 
 def parse_available_files(registry: pd.DataFrame) -> list[str]:
@@ -61,6 +64,8 @@ def parse_available_files(registry: pd.DataFrame) -> list[str]:
             save_dataframe(frame, "admission_regular")
         elif data_type == "early_admission":
             save_dataframe(frame, "admission_early")
+        elif data_type == "score_rank":
+            save_dataframe(frame, "score_rank")
     return logs
 
 
@@ -98,7 +103,7 @@ with st.expander("数据导入与保存", expanded=False):
         st.success("解析流程完成")
     uploaded = st.file_uploader("手动上传数据文件", type=["pdf", "csv", "xlsx", "xls"])
     c1, c2, c3, c4 = st.columns(4)
-    manual_type = c1.selectbox("数据类型", ["catalog", "regular_admission", "early_admission"], key="manual_type")
+    manual_type = c1.selectbox("数据类型", ["catalog", "regular_admission", "early_admission", "score_rank"], key="manual_type")
     manual_year = c2.selectbox("年份", [2026, 2025, 2024], key="manual_year")
     manual_subject = c3.selectbox("科类", ["物理类", "历史类"], key="manual_subject")
     manual_batch = c4.selectbox("批次组", ["regular_undergraduate", "early_A", "early_B", "early_C"], key="manual_batch")
@@ -110,7 +115,7 @@ with st.expander("数据导入与保存", expanded=False):
         result = load_data_file(target, manual_type, manual_year, manual_subject, manual_batch)
         st.write(f"成功 {result.success_rows} 行，失败 {result.failed_rows} 行，可疑 {result.suspicious_rows} 行")
         if not result.dataframe.empty:
-            table = "catalog_2026" if manual_type == "catalog" else ("admission_early" if manual_type == "early_admission" else "admission_regular")
+            table = "catalog_2026" if manual_type == "catalog" else ("admission_early" if manual_type == "early_admission" else ("score_rank" if manual_type == "score_rank" else "admission_regular"))
             save_dataframe(result.dataframe, table)
             st.success("已保存")
     for log in st.session_state.get("parse_logs", []):
@@ -128,7 +133,7 @@ with st.expander("数据导入与保存", expanded=False):
             parse_errors.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
             file_name="parse_errors.csv",
         )
-    template_type = st.selectbox("修正模板类型", ["regular_admission", "catalog", "early_admission"])
+    template_type = st.selectbox("修正模板类型", ["regular_admission", "catalog", "early_admission", "score_rank"])
     template = correction_template(template_type)
     st.download_button(
         "下载人工修正模板",
@@ -147,7 +152,7 @@ with st.expander("数据导入与保存", expanded=False):
         target.write_bytes(corrected.getvalue())
         result = load_data_file(target, template_type, corrected_year, corrected_subject, corrected_batch)
         if not result.dataframe.empty:
-            table = "catalog_2026" if template_type == "catalog" else ("admission_early" if template_type == "early_admission" else "admission_regular")
+            table = "catalog_2026" if template_type == "catalog" else ("admission_early" if template_type == "early_admission" else ("score_rank" if template_type == "score_rank" else "admission_regular"))
             save_dataframe(result.dataframe, table, replace=False)
             st.success(f"已追加修正数据 {len(result.dataframe)} 行")
         else:
@@ -172,7 +177,7 @@ with st.expander("数据导入与保存", expanded=False):
         save_school_meta(meta_df)
         st.success("学校属性库已保存。")
 
-catalog_df, admission_2025_df, admission_2024_df, early_2025_df, early_2024_df, school_meta_df = load_processed_data()
+catalog_df, admission_2025_df, admission_2024_df, early_2025_df, early_2024_df, school_meta_df, score_rank_df = load_processed_data()
 
 left, right = st.columns([1, 1])
 with left:
@@ -218,13 +223,18 @@ safe_high = t3.number_input("保-上限", value=0.35, step=0.01, format="%.2f")
 t4.info("建议比例：冲 20%，稳 40%，保 30%，垫 10%。")
 thresholds = {"冲": (sprint_low, 0.0), "稳": (0.0, stable_high), "保": (stable_high, safe_high), "垫": (safe_high, float("inf"))}
 
-if student_rank <= 0:
+estimated_rank, rank_estimate_note = estimate_rank(score_rank_df, student_score, subject_group)
+effective_rank = student_rank
+if student_rank <= 0 and estimated_rank:
+    effective_rank = estimated_rank
+    st.info(rank_estimate_note)
+elif student_rank <= 0:
     st.warning("请补充全省位次，或导入一分一段表。冲稳保算法必须以位次为主。")
 
 user_profile = {
     "subject_group": subject_group,
     "student_score": student_score,
-    "student_rank": student_rank,
+    "student_rank": effective_rank,
     "candidate_subjects": [first_subject] + reselect_subjects,
     "is_minority": is_minority,
     "accept_preparatory": accept_preparatory,
@@ -242,6 +252,7 @@ user_profile = {
     "major_white_keywords": major_white,
     "major_black_keywords": major_black,
     "show_early_batch": show_early_batch,
+    "requires_early_checks": True,
 }
 
 if st.button("生成普通本科批推荐", type="primary"):
@@ -292,29 +303,57 @@ else:
         if st.button("清空志愿篮子"):
             st.session_state.basket = pd.DataFrame()
 
-    early_df = pd.DataFrame()
-    if show_early_batch:
-        st.subheader("提前批参考模块")
-        ec1, ec2, ec3, ec4 = st.columns(4)
-        user_profile.update(
-            {
-                "show_early_A": ec1.checkbox("查看 A 段", value=True),
-                "show_early_B": ec2.checkbox("查看 B 段", value=True),
-                "show_early_C": ec3.checkbox("查看 C 段", value=True),
-                "accept_military": ec4.checkbox("接受军校"),
-                "accept_police_judicial": st.checkbox("接受公安司法类"),
-                "accept_navigation": st.checkbox("接受航海类"),
-                "accept_public_teacher": st.checkbox("接受公费师范"),
-                "accept_teacher_special": st.checkbox("接受优师专项"),
-                "accept_free_medical": st.checkbox("接受免费医学生"),
-                "accept_comprehensive": st.checkbox("接受综合评价"),
-                "accept_directional_early": st.checkbox("接受提前批定向"),
-            }
-        )
-        early_df = recommend_early(catalog_df, early_2025_df, early_2024_df, user_profile)
-        st.dataframe(early_df, use_container_width=True, hide_index=True)
+    draft_df = generate_volunteer_draft(results)
+    st.subheader("96 个“专业+院校”志愿草表")
+    st.caption("按默认比例生成：冲 20、稳 38、保 28、垫 10；不足 96 个时按稳、保、冲、垫顺序补齐。")
+    st.dataframe(draft_df, use_container_width=True, hide_index=True)
 
-    export_bytes = export_results_to_excel(results_by_level, st.session_state.basket, early_df, user_profile, registry)
+    charter_risk_df = results[results["warnings"].fillna("").astype(str).str.len() > 0][
+        ["school_name", "major_name", "risk_level", "warnings", "risk_reason"]
+    ].copy()
+    st.subheader("招生章程风险提醒")
+    st.dataframe(charter_risk_df, use_container_width=True, hide_index=True)
+
+early_df = pd.DataFrame()
+if show_early_batch:
+    st.subheader("提前批参考模块")
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    user_profile.update(
+        {
+            "show_early_A": ec1.checkbox("查看 A 段", value=True),
+            "show_early_B": ec2.checkbox("查看 B 段", value=True),
+            "show_early_C": ec3.checkbox("查看 C 段", value=True),
+            "accept_military": ec4.checkbox("接受军校"),
+            "accept_police_judicial": st.checkbox("接受公安司法类"),
+            "accept_navigation": st.checkbox("接受航海类"),
+            "accept_public_teacher": st.checkbox("接受公费师范"),
+            "accept_teacher_special": st.checkbox("接受优师专项"),
+            "accept_free_medical": st.checkbox("接受免费医学生"),
+            "accept_comprehensive": st.checkbox("接受综合评价"),
+            "accept_directional_early": st.checkbox("接受提前批定向"),
+            "requires_early_checks": st.checkbox("已完成或愿意完成体检、政审、面试、体能测试等要求", value=True),
+        }
+    )
+    early_df = recommend_early(catalog_df, early_2025_df, early_2024_df, user_profile)
+    tabs = st.tabs(["A 段关注", "B 段关注", "C 段关注", "资格待核验", "不建议填报"])
+    stage_map = [("A", tabs[0]), ("B", tabs[1]), ("C", tabs[2])]
+    for stage, tab in stage_map:
+        with tab:
+            st.dataframe(early_df[early_df["批次段 A/B/C"] == stage], use_container_width=True, hide_index=True)
+    with tabs[3]:
+        st.dataframe(early_df[early_df["风险提示"].fillna("").astype(str).str.contains("资格|体检|政审|面试|体能|身高|视力|性别")], use_container_width=True, hide_index=True)
+    with tabs[4]:
+        st.dataframe(early_df[early_df["风险提示"].fillna("").astype(str).str.contains("风险较高|不可推荐")], use_container_width=True, hide_index=True)
+
+if not results.empty or not early_df.empty:
+    results_by_level = {level: results[results["risk_level"] == level].copy() if not results.empty else pd.DataFrame() for level in ["冲", "稳", "保", "垫", "缺少历史数据"]}
+    draft_df = generate_volunteer_draft(results) if not results.empty else pd.DataFrame()
+    charter_risk_df = (
+        results[results["warnings"].fillna("").astype(str).str.len() > 0][["school_name", "major_name", "risk_level", "warnings", "risk_reason"]].copy()
+        if not results.empty
+        else pd.DataFrame()
+    )
+    export_bytes = export_results_to_excel(results_by_level, st.session_state.basket, early_df, draft_df, charter_risk_df, user_profile, registry)
     st.download_button("导出 Excel", export_bytes, file_name="贵州高考本科志愿筛选结果.xlsx")
 
 st.divider()

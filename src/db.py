@@ -35,6 +35,10 @@ TABLE_COLUMNS = {
         "school_code", "school_name", "province", "city", "school_level", "school_nature", "is_985", "is_211",
         "is_double_first_class", "is_public", "is_private", "is_independent_college", "is_vocational_university",
     ],
+    "score_rank": [
+        "id", "year", "subject_group", "score", "same_score_count", "cumulative_count", "rank_low",
+        "source_file", "source_page", "raw_text",
+    ],
 }
 
 
@@ -67,6 +71,9 @@ def save_dataframe(df: pd.DataFrame, table: str, db_path: str | Path = DB_PATH, 
     elif table == "admission_early":
         years = sorted(str(y) for y in prepared["year"].dropna().unique()) if "year" in prepared else []
         csv_path = PROCESSED_DIR / (f"early_admission_{years[0]}.csv" if len(years) == 1 else "early_admission.csv")
+    elif table == "score_rank":
+        years = sorted(str(y) for y in prepared["year"].dropna().unique()) if "year" in prepared else []
+        csv_path = PROCESSED_DIR / (f"score_rank_{years[0]}.csv" if len(years) == 1 else "score_rank.csv")
     else:
         csv_path = PROCESSED_DIR / f"{table}.csv"
     if not replace and csv_path.exists():

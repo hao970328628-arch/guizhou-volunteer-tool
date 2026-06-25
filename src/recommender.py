@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from .eligibility import check_program_eligibility, check_subject_eligibility
+from .charter_risk import append_charter_risks
 from .major_classifier import classify_major, filter_major
 from .normalizer import normalize_text
 from .risk_model import classify_risk, risk_sort_value
@@ -152,6 +153,7 @@ def recommend_regular(
         )
 
         warnings = "；".join(eligibility_warnings + risk.warnings)
+        warnings = append_charter_risks(warnings, row.get("remarks", ""), row.get("raw_text", ""), row.get("major_name", ""))
         for note in [match_note_2025, match_note_2024]:
             if note and note != "代码完全匹配":
                 warnings = append_warning(warnings, note)
