@@ -11,9 +11,25 @@ streamlit run app.py
 
 如果当前 Python 环境缺少依赖，请先在项目目录内执行安装命令。
 
-## 数据文件位置
+## 推荐方式：直接使用已整理数据
 
-原始文件放在：
+如果已经有整理好的标准 CSV/Excel，不需要再解析 PDF。应用会优先读取 `data/processed/` 下的标准 CSV，生成推荐时直接使用这些数据：
+
+- `data/processed/catalog_2026.csv`：2026 招生专业目录
+- `data/processed/admission_2025_regular.csv`：2025 普通本科批投档数据
+- `data/processed/admission_2024_regular.csv`：2024 普通本科批投档数据
+- `data/processed/early_admission_2025.csv`：2025 提前批 A/B/C，可选
+- `data/processed/early_admission_2024.csv`：2024 提前批 A/B/C，可选
+- `data/processed/score_rank_2024.csv`：一分一段或分数段统计表，可选
+- `data/processed/school_meta.csv`：学校属性库，可选
+
+也可以在页面“数据导入与保存”里使用“直接使用已整理数据（推荐）”上传标准 CSV/Excel。这个入口只读取并保存文件，不调用 PDF 表格提取，也不走解析器。上传文件如果已有 `year`、`subject_group`、`batch_group`、`early_batch_stage` 等字段，会保留原值；缺少这些字段时，会用页面选择项补齐。
+
+标准 CSV 建议使用项目模板中的英文字段，例如 `school_code`、`school_name`、`major_code`、`major_name`、`plan_count`、`min_score`、`min_rank`、`reselect_requirement`、`remarks` 等。字段越完整，匹配和筛选效果越好。
+
+## 原始数据文件位置
+
+如果还没有标准 CSV，才需要使用慢速解析流程。原始文件放在：
 
 - `data/raw/catalog/`：2026 招生专业目录 PDF、CSV 或 Excel
 - `data/raw/admission/2025/`：2025 普通本科批投档、提前批 A/B/C
