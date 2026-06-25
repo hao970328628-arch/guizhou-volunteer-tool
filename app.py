@@ -137,6 +137,24 @@ def build_processed_status() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def missing_required_processed_files(processed_status_df: pd.DataFrame) -> list[str]:
+    if processed_status_df.empty:
+        return [file_name for file_name, _usage, required in PROCESSED_DATA_FILES if required]
+    missing = processed_status_df[(processed_status_df["required"]) & (processed_status_df["status"] == "缺失")]
+    return missing["file_name"].astype(str).tolist()
+
+
+def can_generate_regular(catalog_df: pd.DataFrame, admission_2025_df: pd.DataFrame, admission_2024_df: pd.DataFrame) -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    if catalog_df.empty:
+        missing.append("catalog_2026.csv")
+    if admission_2025_df.empty:
+        missing.append("admission_2025_regular.csv")
+    if admission_2024_df.empty:
+        missing.append("admission_2024_regular.csv")
+    return not missing, missing
+
+
 @st.cache_data(show_spinner=False)
 def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     catalog = load_processed_csv("catalog_2026.csv")
@@ -204,7 +222,12 @@ st.dataframe(
     hide_index=True,
 )
 if processed_missing_required:
-    st.warning("缺少可直接使用的标准数据。可把标准 CSV 放入 data/processed，或在下方上传已整理 CSV/Excel 后直接保存。")
+    missing_files = missing_required_processed_files(processed_status)
+    st.warning(
+        "缺少可直接使用的标准数据："
+        + "、".join(missing_files)
+        + "。可把标准 CSV 放入 data/processed，或在下方上传已整理 CSV/Excel 后直接保存。"
+    )
 else:
     st.success("已找到普通本科批推荐所需的标准数据，生成推荐时无需再解析 PDF。")
 
@@ -417,16 +440,31 @@ user_profile = {
     "requires_early_checks": True,
 }
 
+can_generate, missing_regular_files = can_generate_regular(catalog_df, admission_2025_df, admission_2024_df)
 if st.button("生成普通本科批推荐", type="primary"):
-    with st.spinner("正在筛选普通本科批志愿..."):
-        st.session_state["regular_results"] = recommend_regular(
-            catalog_df, admission_2025_df, admission_2024_df, user_profile, thresholds, school_meta_df
+    if not can_generate:
+        st.session_state["regular_results"] = pd.DataFrame()
+        st.error(
+            "还不能生成普通本科批推荐，缺少标准数据文件："
+            + "、".join(missing_regular_files)
+            + "。请在“数据导入与保存”里上传已整理标准 CSV/Excel，或先使用慢速解析生成标准数据。"
         )
+    elif effective_rank <= 0:
+        st.session_state["regular_results"] = pd.DataFrame()
+        st.error("还不能生成推荐：请先填写全省位次，或导入一分一段表用于估算位次。")
+    else:
+        with st.spinner("正在筛选普通本科批志愿..."):
+            st.session_state["regular_results"] = recommend_regular(
+                catalog_df, admission_2025_df, admission_2024_df, user_profile, thresholds, school_meta_df
+            )
 
 results = st.session_state.get("regular_results", pd.DataFrame())
 st.subheader("普通本科批结果")
 if results.empty:
-    st.info("暂无推荐结果。请先放入或上传 data/processed 标准 CSV，或使用慢速解析生成标准数据后再生成。")
+    if not can_generate:
+        st.info("等待标准数据：请先准备 catalog_2026.csv、admission_2025_regular.csv、admission_2024_regular.csv。")
+    else:
+        st.info("暂无推荐结果。请点击“生成普通本科批推荐”，或调整筛选条件后再试。")
 else:
     tabs = st.tabs(["冲", "稳", "保", "垫", "缺少历史数据"])
     results_by_level = {}
